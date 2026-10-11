@@ -1,0 +1,31 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', 'Helvetica Neue', sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, Menlo, monospace;
+
+  /* 与图标一致的靛蓝作为强调色，琥珀色只用于「需要注意」 */
+  --color-accent: oklch(0.42 0.17 277);
+  --color-accent-soft: oklch(0.94 0.03 277);
+  --color-attention: oklch(0.8 0.15 80);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    cursor: default;
+  }
+  input,
+  textarea,
+  [data-selectable] {
+    user-select: text;
+    cursor: auto;
+  }
+}

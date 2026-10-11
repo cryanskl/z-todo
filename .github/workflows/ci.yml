@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试（TypeScript + Rust 数据层）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
+      # 只测 zt-db：它不依赖 Tauri，Linux 上不需要 WebKit
+      - run: pnpm test:rust
+
+  build-macos:
+    name: macOS 构建
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      # macOS 专属代码（钥匙串、Dock 重新打开）只在这里编译检查
+      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
+      - run: pnpm --filter @z-todo/desktop tauri build --bundles app
+      - name: 打包 .app
+        run: |
+          cd apps/desktop/src-tauri/target/release/bundle/macos
+          ditto -c -k --keepParent z-todo.app z-todo-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: z-todo-macos
+          path: apps/desktop/src-tauri/target/release/bundle/macos/z-todo-macos.zip
+          retention-days: 14

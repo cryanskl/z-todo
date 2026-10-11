@@ -1,0 +1,33 @@
+[workspace]
+members = [".", "db"]
+resolver = "2"
+
+[package]
+name = "z-todo"
+version = "0.1.0"
+description = "z-todo：会拆分任务的个人待办"
+edition = "2021"
+publish = false
+
+[lib]
+name = "z_todo_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+zt-db = { path = "db" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-log = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+log = "0.4"
+keyring-core = "1"
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "http2", "charset", "system-proxy"] }
+
+# 钥匙串只在 macOS 上使用；其他平台（Linux 上的 CI）用 keyring-core 自带的内存模拟存储。
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }

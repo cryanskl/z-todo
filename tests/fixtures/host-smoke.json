@@ -1,0 +1,1057 @@
+{
+  "description": "宿主端口冒烟测试。Rust（rusqlite）与 TypeScript（sql.js）两种实现读取同一份文件、逐条执行，结果必须一致。每个场景从一个刚迁移完的空内存库开始。",
+  "seeds": {
+    "basic": [
+      {
+        "sql": "INSERT INTO task (id, title, lifecycle, origin, created_at, updated_at) VALUES ('t1', '写综述', 'active', 'manual', 0, 0)",
+        "expectChanges": 1
+      },
+      {
+        "sql": "INSERT INTO subtask (id, task_id, kind, title, status, sort_order, created_at, updated_at) VALUES ('s1', 't1', 'actionable', '读 5 篇论文', 'todo', 1, 0, 0)",
+        "expectChanges": 1
+      }
+    ],
+    "running": [
+      {
+        "sql": "INSERT INTO work_session (id, subtask_id, kind, start_at, tz_offset_min, origin, created_at, updated_at) VALUES ('w1', 's1', 'timer', 1000, 480, 'timer', 0, 0)",
+        "expectChanges": 1
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "迁移后版本号、应用标识、表与视图齐全，外键已开启",
+      "steps": [
+        {
+          "query": "PRAGMA user_version",
+          "expect": {
+            "rows": [
+              {
+                "user_version": 1
+              }
+            ]
+          }
+        },
+        {
+          "query": "PRAGMA application_id",
+          "expect": {
+            "rows": [
+              {
+                "application_id": 2054451044
+              }
+            ]
+          }
+        },
+        {
+          "query": "PRAGMA foreign_keys",
+          "expect": {
+            "rows": [
+              {
+                "foreign_keys": 1
+              }
+            ]
+          }
+        },
+        {
+          "query": "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+          "expect": {
+            "rows": [
+              {
+                "n": 21
+              }
+            ]
+          }
+        },
+        {
+          "query": "SELECT name FROM sqlite_master WHERE type = 'view' ORDER BY name",
+          "expect": {
+            "rows": [
+              {
+                "name": "v_task_status"
+              }
+            ]
+          }
+        },
+        {
+          "query": "SELECT scope, rev FROM app_rev",
+          "expect": {
+            "rows": [
+              {
+                "scope": "calendar",
+                "rev": 0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "查询结果保留列顺序，参数按位置绑定",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "query": "SELECT title, id, ? AS echo FROM task WHERE id = ?",
+          "params": [
+            "x",
+            "t1"
+          ],
+          "expect": {
+            "columns": [
+              "title",
+              "id",
+              "echo"
+            ],
+            "rows": [
+              {
+                "title": "写综述",
+                "id": "t1",
+                "echo": "x"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "事务写入后可读回；有工作记录后主任务从待办推导为进行中",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "query": "SELECT status FROM v_task_status WHERE id = 't1'",
+          "expect": {
+            "rows": [
+              {
+                "status": "todo"
+              }
+            ]
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO work_session (id, subtask_id, kind, start_at, tz_offset_min, origin, created_at, updated_at) VALUES (?, ?, 'timer', ?, ?, 'timer', ?, ?)",
+              "params": [
+                "w1",
+                "s1",
+                1000,
+                480,
+                1000,
+                1000
+              ],
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        },
+        {
+          "query": "SELECT status FROM v_task_status WHERE id = 't1'",
+          "expect": {
+            "rows": [
+              {
+                "status": "in_progress"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "子任务未计时直接完成，主任务也推导为进行中",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "UPDATE subtask SET status = 'done', done_at = 5, version = version + 1 WHERE id = 's1' AND version = 1",
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        },
+        {
+          "query": "SELECT status FROM v_task_status WHERE id = 't1'",
+          "expect": {
+            "rows": [
+              {
+                "status": "in_progress"
+              }
+            ]
+          }
+        },
+        {
+          "query": "SELECT count(*) AS n FROM work_session",
+          "expect": {
+            "rows": [
+              {
+                "n": 0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "版本断言失败时整个事务回滚",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO task (id, title, lifecycle, origin, created_at, updated_at) VALUES ('t2', '新任务', 'inbox', 'manual', 0, 0)",
+              "expectChanges": 1
+            },
+            {
+              "sql": "UPDATE task SET title = '改过', version = version + 1, updated_at = 2 WHERE id = 't1' AND version = ?",
+              "params": [
+                99
+              ],
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "conflict",
+              "statementIndex": 1
+            }
+          }
+        },
+        {
+          "query": "SELECT count(*) AS n FROM task WHERE id = 't2'",
+          "expect": {
+            "rows": [
+              {
+                "n": 0
+              }
+            ]
+          }
+        },
+        {
+          "query": "SELECT title, version FROM task WHERE id = 't1'",
+          "expect": {
+            "rows": [
+              {
+                "title": "写综述",
+                "version": 1
+              }
+            ]
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "UPDATE task SET title = '改过', version = version + 1, updated_at = 2 WHERE id = 't1' AND version = ?",
+              "params": [
+                1
+              ],
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        },
+        {
+          "query": "SELECT title, version FROM task WHERE id = 't1'",
+          "expect": {
+            "rows": [
+              {
+                "title": "改过",
+                "version": 2
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "约束失败时整个事务回滚，并指出是第几条语句",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO task (id, title, lifecycle, origin, created_at, updated_at) VALUES ('t3', '会被回滚', 'inbox', 'manual', 0, 0)"
+            },
+            {
+              "sql": "INSERT INTO subtask (id, task_id, kind, title, status, sort_order, created_at, updated_at) VALUES ('s9', 't1', 'unknown', 'x', 'todo', 2, 0, 0)"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 1
+            }
+          }
+        },
+        {
+          "query": "SELECT count(*) AS n FROM task WHERE id = 't3'",
+          "expect": {
+            "rows": [
+              {
+                "n": 0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "不写 expectChanges 时不检查影响行数",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "UPDATE task SET title = 'x' WHERE id = 'nope'"
+            }
+          ],
+          "expect": {
+            "changes": [
+              0
+            ]
+          }
+        },
+        {
+          "tx": [],
+          "expect": {
+            "changes": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "同一子任务同时只能有一段计时在跑",
+      "seeds": [
+        "basic",
+        "running"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO work_session (id, subtask_id, kind, start_at, tz_offset_min, origin, created_at, updated_at) VALUES ('w2', 's1', 'timer', 2000, 480, 'timer', 0, 0)"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "UPDATE work_session SET end_at = 1500, version = version + 1 WHERE id = 'w1' AND version = 1",
+              "expectChanges": 1
+            },
+            {
+              "sql": "INSERT INTO work_session (id, subtask_id, kind, start_at, tz_offset_min, origin, created_at, updated_at) VALUES ('w2', 's1', 'timer', 2000, 480, 'timer', 0, 0)",
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "仅补记时长不能带起止时间；区间补记必须有结束时间",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO work_session (id, subtask_id, kind, start_at, duration_ms, local_date, tz_offset_min, origin, created_at, updated_at) VALUES ('d1', 's1', 'duration', 5, 2700000, '2026-10-11', 480, 'manual', 0, 0)"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO work_session (id, subtask_id, kind, start_at, tz_offset_min, origin, created_at, updated_at) VALUES ('r1', 's1', 'range', 5, 480, 'manual', 0, 0)"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO work_session (id, subtask_id, kind, duration_ms, local_date, tz_offset_min, origin, created_at, updated_at) VALUES ('d1', 's1', 'duration', 2700000, '2026-10-11', 480, 'manual', 0, 0)",
+              "expectChanges": 1
+            },
+            {
+              "sql": "INSERT INTO work_session (id, subtask_id, kind, start_at, end_at, tz_offset_min, origin, created_at, updated_at) VALUES ('r1', 's1', 'range', 5, 10, 480, 'manual', 0, 0)",
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "放弃主任务必须写原因",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "UPDATE task SET lifecycle = 'abandoned' WHERE id = 't1'"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "UPDATE task SET lifecycle = 'abandoned', abandon_reason = '方向变了' WHERE id = 't1'",
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "占位子任务不能进入进行中或完成",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO subtask (id, task_id, kind, title, status, sort_order, created_at, updated_at) VALUES ('p1', 't1', 'placeholder', '写正文', 'in_progress', 2, 0, 0)"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO subtask (id, task_id, kind, title, status, sort_order, created_at, updated_at) VALUES ('p1', 't1', 'placeholder', '写正文', 'todo', 2, 0, 0)",
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "UPDATE subtask SET status = 'done' WHERE id = 'p1'"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "查询接口拒绝写语句，写操作只能走事务",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "query": "DELETE FROM task",
+          "expect": {
+            "error": {
+              "kind": "not_readonly"
+            }
+          }
+        },
+        {
+          "query": "UPDATE task SET title = 'x'",
+          "expect": {
+            "error": {
+              "kind": "not_readonly"
+            }
+          }
+        },
+        {
+          "query": "INSERT INTO tag (id, name, created_at) VALUES ('g1', 'x', 0)",
+          "expect": {
+            "error": {
+              "kind": "not_readonly"
+            }
+          }
+        },
+        {
+          "query": "SELECT title FROM task",
+          "expect": {
+            "rows": [
+              {
+                "title": "写综述"
+              }
+            ]
+          }
+        },
+        {
+          "query": "SELEC 1",
+          "expect": {
+            "error": {
+              "kind": "sql"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "外键：引用不存在的主任务被拒绝；删除主任务级联清理",
+      "seeds": [
+        "basic",
+        "running"
+      ],
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO subtask (id, task_id, kind, title, status, sort_order, created_at, updated_at) VALUES ('s2', 'nope', 'actionable', 'x', 'todo', 1, 0, 0)"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "DELETE FROM task WHERE id = 't1'",
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        },
+        {
+          "query": "SELECT (SELECT count(*) FROM subtask) AS subtasks, (SELECT count(*) FROM work_session) AS sessions",
+          "expect": {
+            "rows": [
+              {
+                "subtasks": 0,
+                "sessions": 0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "布尔参数按 0/1 写入，null 参数写入 NULL",
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO task (id, title, note, no_ai, lifecycle, origin, created_at, updated_at) VALUES (?, ?, ?, ?, 'inbox', 'manual', 0, 0)",
+              "params": [
+                "t5",
+                "私事",
+                null,
+                true
+              ],
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        },
+        {
+          "query": "SELECT no_ai, note FROM task WHERE id = 't5'",
+          "expect": {
+            "rows": [
+              {
+                "no_ai": 1,
+                "note": null
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "日历修订号带断言地递增：基于旧修订号的草稿不能生效",
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "UPDATE app_rev SET rev = rev + 1 WHERE scope = 'calendar' AND rev = ?",
+              "params": [
+                0
+              ],
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "UPDATE app_rev SET rev = rev + 1 WHERE scope = 'calendar' AND rev = ?",
+              "params": [
+                0
+              ],
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "conflict",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "query": "SELECT rev FROM app_rev WHERE scope = 'calendar'",
+          "expect": {
+            "rows": [
+              {
+                "rev": 1
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "JSON 字段必须是合法 JSON",
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO setting (key, value) VALUES ('work_hours', ?)",
+              "params": [
+                "{\"weekday\":[[\"09:00\",\"12:00\"]]}"
+              ],
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO setting (key, value) VALUES ('bad', 'not json')"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "query": "SELECT json_extract(value, '$.weekday[0][1]') AS end_time FROM setting WHERE key = 'work_hours'",
+          "expect": {
+            "rows": [
+              {
+                "end_time": "12:00"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "文本主键不能为空",
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO tag (id, name, created_at) VALUES (NULL, '无主键', 0)"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO task (id, title, lifecycle, origin, created_at, updated_at) VALUES (?, 'x', 'inbox', 'manual', 0, 0)",
+              "params": [
+                null
+              ]
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "constraint",
+              "statementIndex": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "查询接口不能开启或结束事务，也不能附加数据库",
+      "seeds": [
+        "basic"
+      ],
+      "steps": [
+        {
+          "query": "BEGIN",
+          "expect": {
+            "error": {
+              "kind": "not_readonly"
+            }
+          }
+        },
+        {
+          "query": "  -- 注释\n COMMIT",
+          "expect": {
+            "error": {
+              "kind": "not_readonly"
+            }
+          }
+        },
+        {
+          "query": "ATTACH DATABASE ':memory:' AS x",
+          "expect": {
+            "error": {
+              "kind": "not_readonly"
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "UPDATE task SET title = '仍可写入' WHERE id = 't1'",
+              "expectChanges": 1
+            }
+          ],
+          "expect": {
+            "changes": [
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "查询接口不能修改 PRAGMA；外键检查保持开启",
+      "steps": [
+        {
+          "query": "PRAGMA foreign_keys = OFF",
+          "expect": {
+            "error": {
+              "kind": "not_readonly"
+            }
+          }
+        },
+        {
+          "query": "PRAGMA foreign_keys",
+          "expect": {
+            "rows": [
+              {
+                "foreign_keys": 1
+              }
+            ]
+          }
+        },
+        {
+          "query": "PRAGMA user_version(5)",
+          "expect": {
+            "error": {
+              "kind": "not_readonly"
+            }
+          }
+        },
+        {
+          "query": "PRAGMA user_version",
+          "expect": {
+            "rows": [
+              {
+                "user_version": 1
+              }
+            ]
+          }
+        },
+        {
+          "query": "SELECT name FROM pragma_table_info(?) WHERE pk = 1",
+          "params": [
+            "tag"
+          ],
+          "expect": {
+            "rows": [
+              {
+                "name": "id"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "事务计划不能包含事务控制语句或 PRAGMA，整个计划回滚",
+      "steps": [
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO tag (id, name, created_at) VALUES ('g1', '会回滚', 0)"
+            },
+            {
+              "sql": "COMMIT"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "sql",
+              "statementIndex": 1
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "PRAGMA foreign_keys = OFF"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "sql",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "query": "SELECT count(*) AS n FROM tag",
+          "expect": {
+            "rows": [
+              {
+                "n": 0
+              }
+            ]
+          }
+        },
+        {
+          "query": "PRAGMA foreign_keys",
+          "expect": {
+            "rows": [
+              {
+                "foreign_keys": 1
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "毫秒时间戳按整数绑定，参与运算时与整数一致",
+      "steps": [
+        {
+          "query": "SELECT typeof(?) AS t, ? / 7 AS q, (? - ?) / 60000 AS minutes",
+          "params": [
+            1760000000000,
+            1760000000000,
+            1760000123456,
+            1760000000000
+          ],
+          "expect": {
+            "rows": [
+              {
+                "t": "integer",
+                "q": 251428571428,
+                "minutes": 2
+              }
+            ]
+          }
+        },
+        {
+          "query": "SELECT typeof(?) AS small, typeof(?) AS real",
+          "params": [
+            42,
+            1.5
+          ],
+          "expect": {
+            "rows": [
+              {
+                "small": "integer",
+                "real": "real"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "参数个数必须与占位符一致",
+      "steps": [
+        {
+          "query": "SELECT ? AS a, ? AS b",
+          "params": [
+            1
+          ],
+          "expect": {
+            "error": {
+              "kind": "sql"
+            }
+          }
+        },
+        {
+          "query": "SELECT ? AS a",
+          "params": [
+            1,
+            2
+          ],
+          "expect": {
+            "error": {
+              "kind": "sql"
+            }
+          }
+        },
+        {
+          "query": "SELECT '?' AS literal, ? AS a",
+          "params": [
+            1
+          ],
+          "expect": {
+            "rows": [
+              {
+                "literal": "?",
+                "a": 1
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "一次只能执行一条语句；事务里的语句不能返回结果",
+      "steps": [
+        {
+          "query": "SELECT 1 AS a; SELECT 2 AS b",
+          "expect": {
+            "error": {
+              "kind": "sql"
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO tag (id, name, created_at) VALUES ('g1', 'x', 0); DELETE FROM tag"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "sql",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "tx": [
+            {
+              "sql": "INSERT INTO tag (id, name, created_at) VALUES ('g1', 'x', 0) RETURNING id"
+            }
+          ],
+          "expect": {
+            "error": {
+              "kind": "sql",
+              "statementIndex": 0
+            }
+          }
+        },
+        {
+          "query": "SELECT count(*) AS n FROM tag",
+          "expect": {
+            "rows": [
+              {
+                "n": 0
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

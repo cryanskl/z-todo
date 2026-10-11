@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "z-todo：会拆分任务的个人待办"
 edition = "2021"
 publish = false
+license = "MIT"
 
 [lib]
 name = "z_todo_lib"

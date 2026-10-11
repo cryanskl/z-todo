@@ -2,6 +2,7 @@
   "name": "@z-todo/core",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "z-todo 领域核心：纯函数，无 IO",
   "exports": {

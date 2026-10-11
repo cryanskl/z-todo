@@ -3,6 +3,7 @@ name = "zt-db"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT"
 description = "z-todo 数据层：连接、迁移、备份、只读查询与带断言的事务。不依赖 Tauri，可在任何平台单独测试。"
 
 [dependencies]
